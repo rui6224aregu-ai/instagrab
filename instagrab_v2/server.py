@@ -1,5 +1,5 @@
 """
-InstaGrab — ハイブリッド版（画像:スクレイピング / 動画:yt-dlp）
+InstaGrab — Cookie対応ハイブリッド版
 """
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,8 @@ import uvicorn
 import logging
 import re
 import json
+import os
+import tempfile
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse
@@ -85,7 +87,71 @@ def is_safe_cdn(url: str) -> bool:
     except Exception:
         return False
 
-# ── 方法①：スクレイピングで画像取得 ──────────────────
+def get_cookie_file():
+    """環境変数のCookieを一時ファイルに書き出してパスを返す"""
+    cookie_content = os.environ.get("INSTAGRAM_COOKIES", "")
+    if not cookie_content:
+        return None
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    tmp.write(cookie_content)
+    tmp.close()
+    return tmp.name
+
+# ── yt-dlp（Cookie使用・画像＆動画対応） ─────────────
+def ytdlp_media(url: str, cookie_file: str = None) -> dict:
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "ignoreerrors": False,
+    }
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if not info:
+        return {"images": [], "videos": [], "title": "", "description": ""}
+
+    images, videos = [], []
+    title = (info.get("title") or "")[:200]
+    description = (info.get("description") or "")[:500]
+
+    entries = info.get("entries") or [info]
+
+    for entry in entries:
+        if not entry:
+            continue
+
+        url_direct = entry.get("url", "")
+        thumbnail = entry.get("thumbnail", "")
+        thumbnails = entry.get("thumbnails", [])
+        vcodec = entry.get("vcodec", "none")
+        is_video = bool(vcodec and vcodec != "none")
+
+        if is_video and url_direct:
+            if url_direct not in videos:
+                videos.append(url_direct)
+            if thumbnail and thumbnail not in images:
+                images.append(thumbnail)
+        else:
+            if thumbnails:
+                best = sorted(thumbnails, key=lambda t: t.get("width", 0) or 0, reverse=True)
+                src = best[0].get("url", "") if best else ""
+                if src and src not in images:
+                    images.append(src)
+            elif thumbnail and thumbnail not in images:
+                images.append(thumbnail)
+
+    return {
+        "images": images[:20],
+        "videos": videos[:10],
+        "title": title,
+        "description": description,
+    }
+
+# ── スクレイピング（フォールバック用） ────────────────
 async def scrape_media(url: str) -> dict:
     async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
         resp = await client.get(url, headers=SCRAPE_HEADERS)
@@ -111,68 +177,7 @@ async def scrape_media(url: str) -> dict:
             if src and is_safe_cdn(src) and src not in videos:
                 videos.append(src)
 
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "")
-            if isinstance(data, dict):
-                for k in ("image", "thumbnailUrl"):
-                    v = data.get(k)
-                    if isinstance(v, str) and is_safe_cdn(v) and v not in images:
-                        images.append(v)
-                for k in ("contentUrl",):
-                    v = data.get(k)
-                    if isinstance(v, str) and is_safe_cdn(v) and v not in videos:
-                        videos.append(v)
-        except Exception:
-            pass
-
-    for script in soup.find_all("script"):
-        text = script.string or ""
-        for img in re.findall(r'https://[^"\'\s]+\.(?:jpg|jpeg|png|webp)[^"\'\s]*', text):
-            img = img.split("\\")[0]
-            if is_safe_cdn(img) and img not in images and len(img) < 500:
-                images.append(img)
-        for vid in re.findall(r'https://[^"\'\s]+\.mp4[^"\'\s]*', text):
-            vid = vid.split("\\")[0]
-            if is_safe_cdn(vid) and vid not in videos and len(vid) < 500:
-                videos.append(vid)
-
     return {"images": images[:20], "videos": videos[:10], "title": title, "description": description}
-
-# ── 方法②：yt-dlp で動画取得（リール専用） ───────────
-def ytdlp_media(url: str) -> dict:
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "ignoreerrors": False,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    if not info:
-        return {"images": [], "videos": [], "title": "", "description": ""}
-
-    images, videos = [], []
-    title = (info.get("title") or "")[:200]
-    description = (info.get("description") or "")[:500]
-    thumbnail = info.get("thumbnail", "")
-    thumbnails = info.get("thumbnails", [])
-    url_direct = info.get("url", "")
-    vcodec = info.get("vcodec", "none")
-
-    if vcodec and vcodec != "none" and url_direct:
-        videos.append(url_direct)
-
-    if thumbnails:
-        best = sorted(thumbnails, key=lambda t: t.get("width", 0) or 0, reverse=True)
-        src = best[0].get("url", "") if best else ""
-        if src:
-            images.append(src)
-    elif thumbnail:
-        images.append(thumbnail)
-
-    return {"images": images, "videos": videos, "title": title, "description": description}
 
 # ── APIエンドポイント ──────────────────────────────────
 @app.get("/api/extract")
@@ -187,30 +192,27 @@ async def extract(request: Request, url: str):
         logger.warning(f"Invalid URL: {url[:100]}")
         raise HTTPException(status_code=400, detail="有効な Instagram の投稿URL（/p/ /reel/ /tv/）を入力してください")
 
-    is_reel = "/reel/" in url
+    cookie_file = get_cookie_file()
     media = {"images": [], "videos": [], "title": "", "description": ""}
 
-    # リールはyt-dlpで試みる
-    if is_reel:
-        try:
-            media = ytdlp_media(url)
-            logger.info(f"yt-dlp OK: {len(media['images'])}img {len(media['videos'])}vid")
-        except Exception as e:
-            logger.warning(f"yt-dlp failed, fallback to scrape: {e}")
+    # まずyt-dlp（Cookie付き）で試みる
+    try:
+        media = ytdlp_media(url, cookie_file)
+        logger.info(f"yt-dlp OK: {len(media['images'])}img {len(media['videos'])}vid")
+    except Exception as e:
+        logger.warning(f"yt-dlp failed: {e}")
 
-    # 画像投稿 or yt-dlp失敗時はスクレイピング
+    # yt-dlp失敗時はスクレイピングにフォールバック
     if not media["images"] and not media["videos"]:
         try:
             media = await scrape_media(url)
             logger.info(f"scrape OK: {len(media['images'])}img {len(media['videos'])}vid")
-        except httpx.HTTPStatusError as e:
-            code = e.response.status_code
-            if code == 404:
-                raise HTTPException(status_code=404, detail="投稿が見つかりません")
-            raise HTTPException(status_code=502, detail="Instagram へのアクセスに失敗しました")
         except Exception as e:
             logger.error(f"scrape error: {e}")
-            raise HTTPException(status_code=500, detail="サーバーエラーが発生しました")
+
+    # 一時ファイル削除
+    if cookie_file and os.path.exists(cookie_file):
+        os.unlink(cookie_file)
 
     if not media["images"] and not media["videos"]:
         raise HTTPException(status_code=404, detail="メディアが見つかりませんでした。非公開アカウントか、URLが正しくない可能性があります。")
