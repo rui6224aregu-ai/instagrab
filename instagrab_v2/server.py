@@ -292,6 +292,31 @@ async def extract(request: Request, url: str):
 
     return media
 
+# ── 画像プロキシエンドポイント ────────────────────────
+@app.get("/api/proxy")
+@limiter.limit("60/minute")
+async def proxy_image(request: Request, url: str):
+    """InstagramのCDN画像をサーバー経由で返す（CORS回避）"""
+    if not is_safe_cdn(url):
+        raise HTTPException(status_code=400, detail="許可されていないURLです")
+    try:
+        from fastapi.responses import Response
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            resp = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+                "Referer": "https://www.instagram.com/",
+            })
+            resp.raise_for_status()
+        return Response(
+            content=resp.content,
+            media_type=resp.headers.get("content-type", "image/jpeg"),
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except Exception as e:
+        logger.error(f"Proxy error: {e}")
+        raise HTTPException(status_code=502, detail="画像の取得に失敗しました")
+
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
