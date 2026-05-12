@@ -1,5 +1,5 @@
 """
-InstaGrab — Cookie対応ハイブリッド版
+InstaGrab — Cookie対応ハイブリッド版 v2
 """
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,16 +51,6 @@ ALLOWED_PATHS = re.compile(
 
 ALLOWED_CDN = ("cdninstagram.com", "fbcdn.net")
 
-SCRAPE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ja-JP,ja;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-}
-
 def clean_instagram_url(url: str) -> str:
     url = url.strip()
     if len(url) > 2000:
@@ -88,7 +78,7 @@ def is_safe_cdn(url: str) -> bool:
         return False
 
 def get_cookie_file():
-    """環境変数のCookieを一時ファイルに書き出してパスを返す"""
+    """環境変数のCookieを一時ファイルに書き出す"""
     cookie_content = os.environ.get("INSTAGRAM_COOKIES", "")
     if not cookie_content:
         return None
@@ -97,7 +87,21 @@ def get_cookie_file():
     tmp.close()
     return tmp.name
 
-# ── yt-dlp（Cookie使用・画像＆動画対応） ─────────────
+def parse_cookies_txt(cookie_content: str) -> dict:
+    """cookies.txt形式をdictに変換してhttpxで使えるようにする"""
+    cookies = {}
+    for line in cookie_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            name = parts[5]
+            value = parts[6]
+            cookies[name] = value
+    return cookies
+
+# ── yt-dlp（動画・リール用） ──────────────────────────
 def ytdlp_media(url: str, cookie_file: str = None) -> dict:
     ydl_opts = {
         "quiet": True,
@@ -117,13 +121,11 @@ def ytdlp_media(url: str, cookie_file: str = None) -> dict:
     images, videos = [], []
     title = (info.get("title") or "")[:200]
     description = (info.get("description") or "")[:500]
-
     entries = info.get("entries") or [info]
 
     for entry in entries:
         if not entry:
             continue
-
         url_direct = entry.get("url", "")
         thumbnail = entry.get("thumbnail", "")
         thumbnails = entry.get("thumbnails", [])
@@ -144,20 +146,28 @@ def ytdlp_media(url: str, cookie_file: str = None) -> dict:
             elif thumbnail and thumbnail not in images:
                 images.append(thumbnail)
 
-    return {
-        "images": images[:20],
-        "videos": videos[:10],
-        "title": title,
-        "description": description,
+    return {"images": images[:20], "videos": videos[:10], "title": title, "description": description}
+
+# ── スクレイピング（Cookie付きhttpx） ─────────────────
+async def scrape_media(url: str, cookies: dict = None) -> dict:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja-JP,ja;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
     }
 
-# ── スクレイピング（フォールバック用） ────────────────
-async def scrape_media(url: str) -> dict:
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-        resp = await client.get(url, headers=SCRAPE_HEADERS)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15, cookies=cookies or {}) as client:
+        resp = await client.get(url, headers=headers)
         resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = resp.text
+    logger.info(f"HTML length: {len(html)}, has og:image: {'og:image' in html}")
+
+    soup = BeautifulSoup(html, "html.parser")
     images, videos = [], []
     title, description = "", ""
 
@@ -177,6 +187,32 @@ async def scrape_media(url: str) -> dict:
             if src and is_safe_cdn(src) and src not in videos:
                 videos.append(src)
 
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, dict):
+                for k in ("image", "thumbnailUrl"):
+                    v = data.get(k)
+                    if isinstance(v, str) and is_safe_cdn(v) and v not in images:
+                        images.append(v)
+                for k in ("contentUrl",):
+                    v = data.get(k)
+                    if isinstance(v, str) and is_safe_cdn(v) and v not in videos:
+                        videos.append(v)
+        except Exception:
+            pass
+
+    for script in soup.find_all("script"):
+        text = script.string or ""
+        for img in re.findall(r'https://[^"\'\s]+\.(?:jpg|jpeg|png|webp)[^"\'\s]*', text):
+            img = img.split("\\")[0]
+            if is_safe_cdn(img) and img not in images and len(img) < 500:
+                images.append(img)
+        for vid in re.findall(r'https://[^"\'\s]+\.mp4[^"\'\s]*', text):
+            vid = vid.split("\\")[0]
+            if is_safe_cdn(vid) and vid not in videos and len(vid) < 500:
+                videos.append(vid)
+
     return {"images": images[:20], "videos": videos[:10], "title": title, "description": description}
 
 # ── APIエンドポイント ──────────────────────────────────
@@ -193,24 +229,34 @@ async def extract(request: Request, url: str):
         raise HTTPException(status_code=400, detail="有効な Instagram の投稿URL（/p/ /reel/ /tv/）を入力してください")
 
     cookie_file = get_cookie_file()
+    cookie_content = os.environ.get("INSTAGRAM_COOKIES", "")
+    cookies_dict = parse_cookies_txt(cookie_content) if cookie_content else {}
+    logger.info(f"Cookies loaded: {len(cookies_dict)} entries")
+
     media = {"images": [], "videos": [], "title": "", "description": ""}
+    is_reel = "/reel/" in url
 
-    # まずyt-dlp（Cookie付き）で試みる
-    try:
-        media = ytdlp_media(url, cookie_file)
-        logger.info(f"yt-dlp OK: {len(media['images'])}img {len(media['videos'])}vid")
-    except Exception as e:
-        logger.warning(f"yt-dlp failed: {e}")
+    # リールはyt-dlp（Cookie付き）で試みる
+    if is_reel:
+        try:
+            media = ytdlp_media(url, cookie_file)
+            logger.info(f"yt-dlp OK: {len(media['images'])}img {len(media['videos'])}vid")
+        except Exception as e:
+            logger.warning(f"yt-dlp failed: {e}")
 
-    # yt-dlp失敗時はスクレイピングにフォールバック
+    # 画像投稿 or yt-dlp失敗 → Cookie付きスクレイピング
     if not media["images"] and not media["videos"]:
         try:
-            media = await scrape_media(url)
+            media = await scrape_media(url, cookies=cookies_dict)
             logger.info(f"scrape OK: {len(media['images'])}img {len(media['videos'])}vid")
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            if code == 404:
+                raise HTTPException(status_code=404, detail="投稿が見つかりません")
+            raise HTTPException(status_code=502, detail="Instagram へのアクセスに失敗しました")
         except Exception as e:
             logger.error(f"scrape error: {e}")
 
-    # 一時ファイル削除
     if cookie_file and os.path.exists(cookie_file):
         os.unlink(cookie_file)
 
