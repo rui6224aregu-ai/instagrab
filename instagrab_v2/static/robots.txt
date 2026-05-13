@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /api/
 
-Sitemap: https://instagrab-09ra.onrender.com/sitemap.xml
+Sitemap: https://save-grams.com/sitemap.xml
