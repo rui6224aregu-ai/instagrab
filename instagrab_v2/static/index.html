@@ -47,7 +47,6 @@
       --border: #eeeef5;
       --shadow: 0 2px 16px rgba(0,0,0,0.08);
       --radius: 18px;
-      --bottom-bar: 80px;
     }
 
     html { scroll-behavior: smooth; }
@@ -57,7 +56,7 @@
       color: var(--text);
       font-family: 'Zen Kaku Gothic New', sans-serif;
       min-height: 100vh;
-      padding-bottom: calc(var(--bottom-bar) + 24px);
+      padding-bottom: 24px;
       -webkit-tap-highlight-color: transparent;
     }
 
@@ -107,7 +106,7 @@
     /* ── ヒーロー ── */
     .hero {
       text-align: center;
-      padding: 36px 0 20px;
+      padding: 60px 0 20px;
     }
     .hero-title {
       font-family: 'Josefin Sans', sans-serif;
@@ -127,18 +126,7 @@
       font-weight: 700;
       margin-bottom: 12px;
     }
-    .hero-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: linear-gradient(135deg, var(--pink), var(--orange));
-      color: #fff;
-      font-size: .72rem;
-      font-weight: 800;
-      padding: 5px 14px;
-      border-radius: 20px;
-      box-shadow: 0 3px 12px rgba(255,77,141,0.3);
-    }
+
 
     /* ── 広告エリア ── */
     .ad-wrap {
@@ -354,22 +342,19 @@
     }
     footer a { color: var(--muted); text-decoration: underline; margin: 0 6px; }
 
-    /* ── 固定入力バー（画面下部） ── */
-    .input-bar {
-      position: fixed;
-      bottom: 0; left: 0; right: 0;
-      z-index: 200;
+    /* ── インライン入力エリア ── */
+    .input-section {
       background: var(--white);
-      border-top: 1.5px solid var(--border);
-      padding: 12px 16px max(12px, env(safe-area-inset-bottom));
-      box-shadow: 0 -4px 20px rgba(0,0,0,0.08);
+      border-radius: var(--radius);
+      padding: 16px;
+      box-shadow: var(--shadow);
+      border: 1.5px solid var(--border);
+      margin: 16px 0;
     }
     .input-row {
       display: flex;
       gap: 10px;
       align-items: center;
-      max-width: 600px;
-      margin: 0 auto;
     }
     .url-input {
       flex: 1;
@@ -395,6 +380,7 @@
       padding: 0 20px;
       font-family: 'Josefin Sans', sans-serif;
       font-size: .9rem;
+      font-weight: 700;
       cursor: pointer;
       white-space: nowrap;
       min-height: 48px;
@@ -405,14 +391,12 @@
     }
     .btn-go:active { transform: scale(.95); box-shadow: none; }
     .btn-go:disabled { opacity: .5; }
-
-    /* ── ペースト通知 ── */
-    .paste-hint {
+    .input-note {
       text-align: center;
       font-size: .7rem;
       color: var(--muted);
       font-weight: 700;
-      margin-bottom: 4px;
+      margin-top: 10px;
     }
 
     /* ── PC対応 ── */
@@ -439,7 +423,25 @@
     <div class="hero">
       <h1 class="hero-title">インスタの画像・動画を<br><span>かんたん保存！</span></h1>
       <p class="hero-sub">URLを貼るだけ • ログイン不要 • 完全無料</p>
-      <span class="hero-badge">✨ 今すぐ使える</span>
+    </div>
+
+    <!-- 入力エリア -->
+    <div class="input-section">
+      <div class="input-row">
+        <input
+          type="url"
+          id="url-input"
+          class="url-input"
+          placeholder="Instagram の URL を貼り付け"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="none"
+          spellcheck="false"
+          inputmode="url"
+        />
+        <button class="btn-go" id="btn-go" onclick="extract()">保存</button>
+      </div>
+      <p class="input-note">⚠️ 個人利用のみ・非公開アカウント非対応</p>
     </div>
 
     <!-- 広告①上部 -->
@@ -569,24 +571,7 @@
 
   </div><!-- /.main -->
 
-  <!-- 固定入力バー -->
-  <div class="input-bar">
-    <p class="paste-hint">⚠️ 個人利用のみ・非公開アカウント非対応</p>
-    <div class="input-row">
-      <input
-        type="url"
-        id="url-input"
-        class="url-input"
-        placeholder="Instagram の URL を貼り付け"
-        autocomplete="off"
-        autocorrect="off"
-        autocapitalize="none"
-        spellcheck="false"
-        inputmode="url"
-      />
-      <button class="btn-go" id="btn-go" onclick="extract()">保存</button>
-    </div>
-  </div>
+
 
   <script>
     const input = document.getElementById('url-input');
